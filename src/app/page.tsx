@@ -1,16 +1,9 @@
 "use client"
 
-import type React from "react"
-
 // Add type declarations for PDF.js and PDF-lib
 interface PDFDocumentProxy {
   numPages: number;
   getPage: (pageNumber: number) => Promise<PDFPageProxy>;
-}
-
-interface PDFPageViewport {
-  width: number;
-  height: number;
 }
 
 interface PDFPageProxy {
@@ -18,7 +11,12 @@ interface PDFPageProxy {
   render: (options: { canvasContext: CanvasRenderingContext2D; viewport: PDFPageViewport }) => { promise: Promise<void> };
 }
 
-interface PDFJSLib {
+interface PDFPageViewport {
+  width: number;
+  height: number;
+}
+
+interface PDFJSStatic {
   getDocument: (data: ArrayBuffer) => { promise: Promise<PDFDocumentProxy> };
   GlobalWorkerOptions: { workerSrc: string };
 }
@@ -39,7 +37,7 @@ interface PDFImage {
   height: number;
 }
 
-interface PDFLib {
+interface PDFLibStatic {
   PDFDocument: {
     create: () => Promise<PDFDocument>;
   };
@@ -47,33 +45,10 @@ interface PDFLib {
 
 declare global {
   interface Window {
-    pdfjsLib: PDFJSLib;
-    PDFLib: PDFLib;
+    pdfjsLib: PDFJSStatic | undefined;
+    PDFLib: PDFLibStatic | undefined;
   }
 }
-
-import { useState, useRef, useEffect, useCallback } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Separator } from "@/components/ui/separator"
-import { Slider } from "@/components/ui/slider"
-import { Textarea } from "@/components/ui/textarea"
-import {
-  Upload,
-  Edit3,
-  Download,
-  CloudyIcon as Blur,
-  Eraser,
-  Type,
-  ChevronLeft,
-  ChevronRight,
-  RotateCcw,
-  Move,
-  Check,
-  X,
-} from "lucide-react"
 
 interface BlurStroke {
   x: number
@@ -103,6 +78,29 @@ interface TextBox {
   isEditing: boolean
 }
 
+import { useState, useRef, useEffect, useCallback } from "react"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Separator } from "@/components/ui/separator"
+import { Slider } from "@/components/ui/slider"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Upload,
+  Edit3,
+  Download,
+  CloudyIcon as Blur,
+  Eraser,
+  Type,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
+  Move,
+  Check,
+  X,
+} from "lucide-react"
+
 export default function PDFEditor() {
   const [pdfFile, setPdfFile] = useState<File | null>(null)
   const [isEditing, setIsEditing] = useState(false)
@@ -127,49 +125,82 @@ export default function PDFEditor() {
   const pdfDocRef = useRef<PDFDocumentProxy>(null)
   const originalCanvasRef = useRef<HTMLCanvasElement>(null)
 
-  useEffect(() => {
-    // Load PDF.js
-    const script = document.createElement("script")
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
-    script.onload = () => {
-      // @ts-ignore
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
-    }
-    document.head.appendChild(script)
-  }, [])
+  const applyBlurStrokes = (
+    strokes: BlurStroke[],
+    context: CanvasRenderingContext2D,
+    originalContext: CanvasRenderingContext2D,
+  ) => {
+    strokes.forEach((stroke) => {
+      const radius = stroke.size / 2
+      const tempCanvas = document.createElement("canvas")
+      const tempContext = tempCanvas.getContext("2d")
+      if (!tempContext) return
 
-  // Add new useEffect for rendering first page when entering edit mode
-  useEffect(() => {
-    if (isEditing && pdfDocRef.current) {
-      setIsLoading(true)
-      renderPage(currentPage).finally(() => {
-        setIsLoading(false)
-      })
-    }
-  }, [isEditing])
+      tempCanvas.width = stroke.size
+      tempCanvas.height = stroke.size
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (file && file.type === "application/pdf") {
-      setPdfFile(file)
-      await loadPDF(file)
-    }
+      const sourceX = Math.max(0, stroke.x - radius)
+      const sourceY = Math.max(0, stroke.y - radius)
+      const sourceWidth = Math.min(stroke.size, originalContext.canvas.width - sourceX)
+      const sourceHeight = Math.min(stroke.size, originalContext.canvas.height - sourceY)
+
+      if (sourceWidth > 0 && sourceHeight > 0) {
+        tempContext.drawImage(
+          originalContext.canvas,
+          sourceX,
+          sourceY,
+          sourceWidth,
+          sourceHeight,
+          0,
+          0,
+          sourceWidth,
+          sourceHeight,
+        )
+
+        context.save()
+        context.filter = `blur(${stroke.intensity}px)`
+        context.drawImage(tempCanvas, sourceX, sourceY)
+        context.restore()
+      }
+    })
   }
 
-  const loadPDF = async (file: File) => {
-    const arrayBuffer = await file.arrayBuffer()
-    // @ts-ignore
-    const pdf = await window.pdfjsLib.getDocument(arrayBuffer).promise
-    pdfDocRef.current = pdf
-    setTotalPages(pdf.numPages)
-    setCurrentPage(1)
-
-    // Ensure we wait for the page to render completely
-    await renderPage(1, pdf)
+  const applyEraseStrokes = (strokes: EraseStroke[], context: CanvasRenderingContext2D) => {
+    strokes.forEach((stroke) => {
+      context.save()
+      context.fillStyle = "#ffffff"
+      context.beginPath()
+      context.arc(stroke.x, stroke.y, stroke.size / 2, 0, 2 * Math.PI)
+      context.fill()
+      context.restore()
+    })
   }
 
-  const renderPage = async (pageNum: number, pdf?: PDFDocumentProxy) => {
+  const applyAllEdits = useCallback((pageNum: number) => {
+    const canvas = canvasRef.current
+    const originalCanvas = originalCanvasRef.current
+    if (!canvas || !originalCanvas) return
+
+    const context = canvas.getContext("2d")
+    const originalContext = originalCanvas.getContext("2d")
+    if (!context || !originalContext) return
+
+    // Start fresh from original
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    context.drawImage(originalCanvas, 0, 0)
+
+    const actions = editActions[pageNum] || []
+
+    actions.forEach((action) => {
+      if (action.type === "blur") {
+        applyBlurStrokes(action.strokes as BlurStroke[], context, originalContext)
+      } else if (action.type === "erase") {
+        applyEraseStrokes(action.strokes as EraseStroke[], context)
+      }
+    })
+  }, [editActions])
+
+  const renderPage = useCallback(async (pageNum: number, pdf?: PDFDocumentProxy) => {
     const pdfDoc = pdf || pdfDocRef.current
     if (!pdfDoc) return
 
@@ -207,86 +238,50 @@ export default function PDFEditor() {
     } catch (error) {
       console.error("Error rendering page:", error)
     }
-  }
+  }, [applyAllEdits])
 
-  const applyAllEdits = (pageNum: number) => {
-    const canvas = canvasRef.current
-    const originalCanvas = originalCanvasRef.current
-    if (!canvas || !originalCanvas) return
-
-    const context = canvas.getContext("2d")
-    const originalContext = originalCanvas.getContext("2d")
-    if (!context || !originalContext) return
-
-    // Start fresh from original
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    context.drawImage(originalCanvas, 0, 0)
-
-    const actions = editActions[pageNum] || []
-
-    actions.forEach((action) => {
-      if (action.type === "blur") {
-        applyBlurStrokes(action.strokes as BlurStroke[], context, originalContext)
-      } else if (action.type === "erase") {
-        applyEraseStrokes(action.strokes as EraseStroke[], context)
+  useEffect(() => {
+    // Load PDF.js
+    const script = document.createElement("script")
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+    script.onload = () => {
+      const pdfjsLib = window.pdfjsLib
+      if (pdfjsLib?.GlobalWorkerOptions) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
       }
-    })
+    }
+    document.head.appendChild(script)
+  }, [])
+
+  useEffect(() => {
+    if (isEditing && pdfDocRef.current) {
+      setIsLoading(true)
+      renderPage(currentPage).finally(() => {
+        setIsLoading(false)
+      })
+    }
+  }, [isEditing, currentPage, renderPage])
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (file && file.type === "application/pdf") {
+      setPdfFile(file)
+      await loadPDF(file)
+    }
   }
 
-  const applyBlurStrokes = (
-    strokes: BlurStroke[],
-    context: CanvasRenderingContext2D,
-    originalContext: CanvasRenderingContext2D,
-  ) => {
-    strokes.forEach((stroke) => {
-      const radius = stroke.size / 2
-
-      // Create a temporary canvas for the blur effect
-      const tempCanvas = document.createElement("canvas")
-      const tempContext = tempCanvas.getContext("2d")
-      if (!tempContext) return
-
-      tempCanvas.width = stroke.size
-      tempCanvas.height = stroke.size
-
-      // Get the original image data for this area
-      const sourceX = Math.max(0, stroke.x - radius)
-      const sourceY = Math.max(0, stroke.y - radius)
-      const sourceWidth = Math.min(stroke.size, originalContext.canvas.width - sourceX)
-      const sourceHeight = Math.min(stroke.size, originalContext.canvas.height - sourceY)
-
-      if (sourceWidth > 0 && sourceHeight > 0) {
-        // Draw the original area to temp canvas
-        tempContext.drawImage(
-          originalContext.canvas,
-          sourceX,
-          sourceY,
-          sourceWidth,
-          sourceHeight,
-          0,
-          0,
-          sourceWidth,
-          sourceHeight,
-        )
-
-        // Apply blur filter and draw back to main canvas
-        context.save()
-        context.filter = `blur(${stroke.intensity}px)`
-        context.drawImage(tempCanvas, sourceX, sourceY)
-        context.restore()
-      }
-    })
-  }
-
-  const applyEraseStrokes = (strokes: EraseStroke[], context: CanvasRenderingContext2D) => {
-    strokes.forEach((stroke) => {
-      context.save()
-      context.fillStyle = "#ffffff"
-      context.beginPath()
-      context.arc(stroke.x, stroke.y, stroke.size / 2, 0, 2 * Math.PI)
-      context.fill()
-      context.restore()
-    })
+  const loadPDF = async (file: File) => {
+    const arrayBuffer = await file.arrayBuffer()
+    const pdfjsLib = window.pdfjsLib
+    if (!pdfjsLib?.getDocument) {
+      throw new Error("PDF.js is not loaded")
+    }
+    const pdf = await pdfjsLib.getDocument(arrayBuffer).promise
+    pdfDocRef.current = pdf
+    setTotalPages(pdf.numPages)
+    setCurrentPage(1)
+    await renderPage(1, pdf)
   }
 
   const getCanvasCoordinates = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -514,32 +509,38 @@ export default function PDFEditor() {
 
     try {
       // Load PDF.js script for PDF generation if not already loaded
-      if (!window.pdfjsLib) {
+      if (!window.pdfjsLib?.GlobalWorkerOptions) {
         await new Promise((resolve) => {
           const script = document.createElement("script")
           script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
           script.onload = resolve
           document.head.appendChild(script)
         })
-        // @ts-ignore
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
+        const pdfjsLib = window.pdfjsLib
+        if (pdfjsLib?.GlobalWorkerOptions) {
+          pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"
+        }
       }
 
       // Load pdf-lib for PDF manipulation
-      const pdfLibScript = document.createElement("script")
-      pdfLibScript.src = "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
-      document.head.appendChild(pdfLibScript)
+      if (!window.PDFLib?.PDFDocument) {
+        const pdfLibScript = document.createElement("script")
+        pdfLibScript.src = "https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
+        document.head.appendChild(pdfLibScript)
 
-      await new Promise((resolve) => {
-        pdfLibScript.onload = resolve
-      })
+        await new Promise((resolve) => {
+          pdfLibScript.onload = resolve
+        })
+      }
 
-      // @ts-ignore
-      const { PDFDocument } = window.PDFLib
+      const PDFLib = window.PDFLib
+      if (!PDFLib?.PDFDocument) {
+        throw new Error("PDF-lib is not loaded")
+      }
 
       // Create a new PDF document
-      const pdfDoc = await PDFDocument.create()
+      const pdfDoc = await PDFLib.PDFDocument.create()
 
       // Process each page
       for (let i = 1; i <= totalPages; i++) {
